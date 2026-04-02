@@ -1,0 +1,22 @@
+[project]
+name = "whisper-cli"
+version = "0.1.0"
+description = "Transcribe videos with Whisper, summarize with OpenAI, push to Snippety"
+requires-python = ">=3.10"
+dependencies = [
+    "typer[all]>=0.9",
+    "openai>=1.0",
+    "openai-whisper>=20231117",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+vidsum = "whisper_cli.cli:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
