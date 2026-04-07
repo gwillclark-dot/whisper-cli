@@ -10,6 +10,16 @@ Trigger keywords: summarize, tl;dr, tldr, transcribe, process
 Dispatch JSON:    {"action": "process"} (or "transcribe" / "summarize")
 Dedupe override:  include "process anyway" or "retry" to bypass 24h dedupe.
 
+Per-source locking and 120s debounce prevent duplicate jobs.
+
+Single-message lifecycle:
+  - Post one "⏳ Working…" placeholder (skipped in QUIET_MODE)
+  - Edit that message with the final TL;DR or error
+  - Retries reuse the same Discord message (no new posts)
+
+QUIET_MODE: when .whisper_quiet_mode exists, suppress the "Working…" placeholder
+  and any intermediate posts — only the final result is posted/edited.
+
 Auto-watch (no explicit prompt) is DISABLED.
 
 Run manually:  python3 whisper_watcher.py
@@ -18,11 +28,13 @@ Run once:      python3 whisper_watcher.py --once
 
 import argparse
 import fcntl
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -31,24 +43,28 @@ from whisper_cli.dedupe import file_hash, has_override, is_duplicate, mark_proce
 # ── Config ────────────────────────────────────────────────────────────────
 
 WHISPER_CHANNEL = "1490901110414905580"
-STATE_FILE = Path(__file__).parent / ".whisper_watcher_state.json"
+STATE_DIR = Path(__file__).parent / ".whisper_state"
+STATE_FILE = STATE_DIR / "watcher_state.json"
 LOCK_FILE = Path(__file__).parent / ".whisper_watcher.lock"
+LOCKS_DIR = STATE_DIR / "locks"
 POLL_INTERVAL = 30  # seconds
+DEBOUNCE_SECONDS = 120
 
-# QUIET_MODE: when this file exists, all Discord posts from this watcher are
-# suppressed and in-flight jobs short-circuit before posting.
+# QUIET_MODE: when this file exists, suppress "Working…" and intermediate posts.
+# Only the final result message is posted.
 # To re-enable: delete .whisper_quiet_mode or run with --disable-quiet-mode.
 QUIET_MODE_FILE = Path(__file__).parent / ".whisper_quiet_mode"
+
+GEORGE_USER_ID = "732025456617979925"
+
+TRIGGER_KEYWORDS = ("summarize", "tl;dr", "tldr", "transcribe", "process")
+
+MAX_RETRIES = 3
 
 
 def is_quiet_mode() -> bool:
     return QUIET_MODE_FILE.exists()
 
-# Only messages from this user will trigger processing.
-GEORGE_USER_ID = "732025456617979925"
-
-# Explicit trigger keywords (any substring match, case-insensitive).
-TRIGGER_KEYWORDS = ("summarize", "tl;dr", "tldr", "transcribe", "process")
 
 # ── State ─────────────────────────────────────────────────────────────────
 
@@ -58,47 +74,128 @@ def load_state() -> dict:
             return json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return {"processed_ids": [], "last_message_id": None}
+    return {"processed_ids": [], "last_message_id": None, "debounce": {}}
 
 
 def save_state(state: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-# ── Discord ───────────────────────────────────────────────────────────────
+# ── Per-source lock ───────────────────────────────────────────────────────
 
-def read_messages(after_id: str | None = None) -> list[dict]:
-    cmd = ["clawdbot", "message", "read", "--channel", "discord",
-           "--target", WHISPER_CHANNEL, "--json", "--limit", "20"]
-    if after_id:
-        cmd += ["--after", after_id]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+def _source_lock_path(source_id: str) -> Path:
+    key = hashlib.sha256(source_id.encode()).hexdigest()[:16]
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    return LOCKS_DIR / f"{key}.lock"
+
+
+def acquire_source_lock(source_id: str):
+    """Return an open, exclusively-locked file handle, or None if already locked."""
+    lock_path = _source_lock_path(source_id)
+    fp = open(lock_path, "w")
+    try:
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fp
+    except OSError:
+        fp.close()
+        return None
+
+
+def release_source_lock(fp) -> None:
+    if fp:
+        try:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fp.close()
+
+
+# ── Debounce ──────────────────────────────────────────────────────────────
+
+def is_debounced(source_id: str, state: dict) -> bool:
+    """Return True if the same source was triggered within DEBOUNCE_SECONDS."""
+    entry = state.get("debounce", {}).get(source_id)
+    if not entry:
+        return False
+    try:
+        then = datetime.fromisoformat(entry["triggered_at"])
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(tz=timezone.utc) - then).total_seconds()
+        return elapsed < DEBOUNCE_SECONDS
+    except Exception:
+        return False
+
+
+def record_debounce(source_id: str, discord_msg_id: str | None, state: dict) -> None:
+    if "debounce" not in state:
+        state["debounce"] = {}
+    state["debounce"][source_id] = {
+        "triggered_at": datetime.now(tz=timezone.utc).isoformat(),
+        "discord_msg_id": discord_msg_id,
+    }
+    # Prune old entries (keep last 100)
+    if len(state["debounce"]) > 100:
+        oldest = sorted(
+            state["debounce"].items(),
+            key=lambda kv: kv[1].get("triggered_at", ""),
+        )
+        for k, _ in oldest[:-100]:
+            del state["debounce"][k]
+
+
+# ── Discord messaging ─────────────────────────────────────────────────────
+
+def post_message(text: str) -> str | None:
+    """Post to #whisper. Returns Discord message_id, or None on failure."""
+    result = subprocess.run(
+        ["clawdbot", "message", "send", "--channel", "discord",
+         "--target", WHISPER_CHANNEL, "--message", text, "--json"],
+        capture_output=True, text=True,
+    )
     if result.returncode != 0:
-        print(f"[whisper-watcher] clawdbot read failed: {result.stderr.strip()}")
-        return []
+        print(f"[whisper-watcher] post failed: {result.stderr.strip()}")
+        return None
     try:
         data = json.loads(result.stdout)
-        return data["payload"]["messages"]
+        # clawdbot returns payload.message.id or payload.id
+        payload = data.get("payload", {})
+        msg = payload.get("message", payload)
+        return str(msg.get("id") or msg.get("messageId") or "")
     except Exception as e:
-        print(f"[whisper-watcher] parse error: {e}")
-        return []
+        print(f"[whisper-watcher] could not parse message id: {e}")
+        return None
 
 
-def post_to_whisper(message: str) -> None:
-    if is_quiet_mode():
-        print(f"[whisper-watcher] QUIET_MODE active — suppressed post: {message[:80]!r}")
+def edit_message(message_id: str, text: str) -> None:
+    """Edit an existing Discord message. Falls back to a new post if id missing."""
+    if not message_id:
+        post_message(text)
         return
-    subprocess.run(
-        ["clawdbot", "message", "send", "--channel", "discord",
-         "--target", WHISPER_CHANNEL, "--message", message],
-        capture_output=True,
+    result = subprocess.run(
+        ["clawdbot", "message", "edit", "--channel", "discord",
+         "--target", WHISPER_CHANNEL, "--message-id", message_id,
+         "--message", text],
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        print(f"[whisper-watcher] edit failed (msg {message_id}): {result.stderr.strip()}")
+        # Fall back: post new message
+        post_message(text)
+
+
+def post_or_edit(discord_msg_id: str | None, text: str) -> str | None:
+    """Edit existing message if we have an id, otherwise post new."""
+    if discord_msg_id:
+        edit_message(discord_msg_id, text)
+        return discord_msg_id
+    return post_message(text)
 
 
 # ── Download ──────────────────────────────────────────────────────────────
 
 def download_attachment(url: str, dest_dir: Path) -> Path:
-    """Download a Discord CDN attachment via curl."""
     filename = url.split("/")[-1].split("?")[0]
     dest = dest_dir / filename
     result = subprocess.run(
@@ -111,7 +208,6 @@ def download_attachment(url: str, dest_dir: Path) -> Path:
 
 
 def download_url(url: str, dest_dir: Path) -> Path:
-    """Download YouTube/TikTok via yt-dlp."""
     template = str(dest_dir / "%(title).60s.%(ext)s")
     result = subprocess.run(
         ["yt-dlp", "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
@@ -133,21 +229,35 @@ def download_url(url: str, dest_dir: Path) -> Path:
 
 # ── Transcribe + Summarize ────────────────────────────────────────────────
 
-def transcribe_and_summarize(video_path: Path) -> str:
-    """Run transcription + summarization, return formatted result."""
+def transcribe_and_summarize(video_path: Path, discord_msg_id: str | None) -> str:
+    """Transcribe + summarize with retries. Edits discord_msg_id on each retry.
+    Returns formatted summary. Raises on final failure."""
     from whisper_cli.config import load_config
     from whisper_cli.transcriber import transcribe
     from whisper_cli.summarizer import summarize
 
     cfg = load_config()
+    last_exc: Exception | None = None
 
-    print(f"[whisper-watcher] Transcribing {video_path.name}...")
-    transcript = transcribe(video_path, api_key=cfg.openai_api_key)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            print(f"[whisper-watcher] Transcribing {video_path.name} (attempt {attempt})...")
+            transcript = transcribe(video_path, cfg.whisper_model)
 
-    print(f"[whisper-watcher] Summarizing ({len(transcript)} chars)...")
-    summary = summarize(transcript, video_path.name, cfg.openai_api_key)
+            print(f"[whisper-watcher] Summarizing ({len(transcript)} chars)...")
+            summary = summarize(transcript, video_path.name, cfg.openai_api_key)
+            return summary
 
-    return summary
+        except Exception as e:
+            last_exc = e
+            print(f"[whisper-watcher] attempt {attempt} failed: {e}")
+            if attempt < MAX_RETRIES:
+                retry_text = f"⏳ Processing… (retry {attempt}/{MAX_RETRIES - 1})"
+                if not is_quiet_mode():
+                    post_or_edit(discord_msg_id, retry_text)
+                time.sleep(2 ** attempt)  # brief backoff
+
+    raise last_exc  # type: ignore[misc]
 
 
 # ── URL Detection ─────────────────────────────────────────────────────────
@@ -156,7 +266,6 @@ SUPPORTED_DOMAINS = ("youtube.com", "youtu.be", "tiktok.com", "vm.tiktok.com")
 
 
 def extract_urls(content: str) -> list[str]:
-    """Pull YouTube/TikTok URLs from message content."""
     urls = []
     for word in content.split():
         if word.startswith("http") and any(d in word for d in SUPPORTED_DOMAINS):
@@ -167,17 +276,14 @@ def extract_urls(content: str) -> list[str]:
 # ── Gate checks ───────────────────────────────────────────────────────────
 
 def is_from_george(msg: dict) -> bool:
-    """Return True if the message author is George. Rejects if author unknown."""
     author = msg.get("author") or {}
     return str(author.get("id", "")) == GEORGE_USER_ID
 
 
 def has_trigger(content: str) -> bool:
-    """Return True if content contains an explicit processing trigger or dispatch JSON."""
     lower = content.lower()
     if any(kw in lower for kw in TRIGGER_KEYWORDS):
         return True
-    # Dispatch JSON: {"action": "process"} / {"action": "transcribe"} etc.
     try:
         data = json.loads(content.strip())
         return isinstance(data, dict) and data.get("action") in ("process", "transcribe", "summarize")
@@ -185,22 +291,91 @@ def has_trigger(content: str) -> bool:
         return False
 
 
-# ── Main Loop ─────────────────────────────────────────────────────────────
+# ── Core source processing ────────────────────────────────────────────────
+
+def process_source(
+    source_id: str,
+    source_label: str,
+    source_type: str,
+    get_video: callable,
+    force: bool,
+    state: dict,
+    tmp: Path,
+) -> bool:
+    """Process a single source (attachment or URL). Returns True if processed."""
+
+    # Debounce: same source triggered within 120s → skip
+    if not force and is_debounced(source_id, state):
+        print(f"[whisper-watcher] Debounce: {source_label} triggered within {DEBOUNCE_SECONDS}s — skipping")
+        return False
+
+    # Per-source lock: skip if another process is already handling this source
+    lock_fp = acquire_source_lock(source_id)
+    if lock_fp is None:
+        print(f"[whisper-watcher] Lock busy: {source_label} — job already in flight")
+        return False
+
+    discord_msg_id: str | None = None
+
+    try:
+        # Last-item dedupe (24h window)
+        if not force and is_duplicate(source_id, source_type):
+            print(f"[whisper-watcher] Dedupe: {source_label} already processed within 24h")
+            short = source_label[:60] + "…" if len(source_label) > 60 else source_label
+            post_message(
+                f"⚠️ `{short}` matches last processed item (within 24h). "
+                "Reply: process anyway"
+            )
+            record_debounce(source_id, None, state)
+            return False
+
+        # Post "Working…" placeholder (skipped in QUIET_MODE)
+        if not is_quiet_mode():
+            short = source_label[:60] + "…" if len(source_label) > 60 else source_label
+            discord_msg_id = post_message(f"⏳ Working on `{short}`…")
+
+        # Record debounce entry with discord_msg_id
+        record_debounce(source_id, discord_msg_id, state)
+        save_state(state)
+
+        # Fetch video
+        video_path = get_video(tmp)
+        content_hash = file_hash(video_path) if source_type == "file" else None
+
+        # Transcribe + summarize (retries reuse discord_msg_id)
+        summary = transcribe_and_summarize(video_path, discord_msg_id)
+
+        # Build final message
+        short = source_label[:60] + "…" if len(source_label) > 60 else source_label
+        final_text = f"✅ **{short}**\n{summary}"
+
+        # Edit or post final result
+        discord_msg_id = post_or_edit(discord_msg_id, final_text)
+
+        dedupe_mark(source_id, source_type, content_hash)
+        return True
+
+    except Exception as e:
+        print(f"[whisper-watcher] Failed to process {source_label}: {e}")
+        err_text = f"⚠️ Failed: `{source_label[:60]}`\n{e}"
+        post_or_edit(discord_msg_id, err_text)
+        # Don't mark as processed — failure is retryable
+        return False
+
+    finally:
+        release_source_lock(lock_fp)
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────
 
 def process_message(msg: dict, state: dict) -> bool:
-    """Process a single message. Returns True if anything was processed.
-
-    Note: msg_id is added to processed_ids AFTER work completes (not before).
-    Fetch failures are NOT marked processed so they can be retried next poll.
-    Dedupe skips ARE marked processed to prevent repeated nag messages.
-    """
+    """Process a single Discord message. Returns True if any source was processed."""
     msg_id = msg["id"]
     content = msg.get("content", "")
     attachments = msg.get("attachments", [])
     force = has_override(content)
 
-    processed = False
-    any_work_attempted = False
+    any_work = False
 
     with tempfile.TemporaryDirectory(prefix="whisper_dl_") as tmpdir:
         tmp = Path(tmpdir)
@@ -210,80 +385,68 @@ def process_message(msg: dict, state: dict) -> bool:
             if not att.get("content_type", "").startswith("video/"):
                 continue
             source_id = att["filename"]
-            print(f"[whisper-watcher] Attachment: {source_id} ({att['size']//1024}KB)")
+            att_url = att["url"]
+            print(f"[whisper-watcher] Attachment: {source_id}")
 
-            if not force and is_duplicate(source_id, "file"):
-                print(f"[whisper-watcher] Dedupe: {source_id} already processed within 24h")
-                post_to_whisper(
-                    f"⚠️ Looks like the last item (`{source_id}`) is the same as this one. "
-                    "Re-run? Reply: process anyway"
-                )
-                any_work_attempted = True  # mark so we don't nag again
-                continue
-
-            any_work_attempted = True
-            try:
-                video_path = download_attachment(att["url"], tmp)
-                content_hash = file_hash(video_path)
-                if is_quiet_mode():
-                    print(f"[whisper-watcher] QUIET_MODE active — aborting job for {att['filename']}")
-                    continue
-                summary = transcribe_and_summarize(video_path)
-                post_to_whisper(f"**{att['filename']}**\n{summary}")
-                dedupe_mark(source_id, "file", content_hash)
-                processed = True
-            except Exception as e:
-                print(f"[whisper-watcher] Failed: {e}")
-                post_to_whisper(f"⚠️ Failed to process `{att['filename']}`: {e}")
-                # Do NOT mark msg_id processed — fetch failures are retryable
+            did_work = process_source(
+                source_id=source_id,
+                source_label=source_id,
+                source_type="file",
+                get_video=lambda t, u=att_url: download_attachment(u, t),
+                force=force,
+                state=state,
+                tmp=tmp,
+            )
+            if did_work:
+                any_work = True
 
         # Process YouTube/TikTok URLs
         for url in extract_urls(content):
             source_id = url.rstrip("/")
             print(f"[whisper-watcher] URL: {source_id}")
 
-            if not force and is_duplicate(source_id, "url"):
-                print(f"[whisper-watcher] Dedupe: URL already processed within 24h")
-                short_url = source_id[:60] + "..." if len(source_id) > 60 else source_id
-                post_to_whisper(
-                    f"⚠️ Looks like the last item (`{short_url}`) is the same as this one. "
-                    "Re-run? Reply: process anyway"
-                )
-                any_work_attempted = True
-                continue
+            did_work = process_source(
+                source_id=source_id,
+                source_label=source_id,
+                source_type="url",
+                get_video=lambda t, u=url: download_url(u, t),
+                force=force,
+                state=state,
+                tmp=tmp,
+            )
+            if did_work:
+                any_work = True
 
-            any_work_attempted = True
-            try:
-                video_path = download_url(url, tmp)
-                if is_quiet_mode():
-                    print(f"[whisper-watcher] QUIET_MODE active — aborting job for {url[:60]}")
-                    continue
-                summary = transcribe_and_summarize(video_path)
-                short_url = url[:60] + "..." if len(url) > 60 else url
-                post_to_whisper(f"**{short_url}**\n{summary}")
-                dedupe_mark(source_id, "url")
-                processed = True
-            except Exception as e:
-                print(f"[whisper-watcher] Failed: {e}")
-                post_to_whisper(f"⚠️ Failed to process URL: {e}")
-                # Do NOT mark msg_id processed — fetch failures are retryable
+    # Mark message as seen after attempting work
+    state["processed_ids"].append(msg_id)
+    state["processed_ids"] = state["processed_ids"][-2000:]
+    save_state(state)
 
-    # Only mark as seen if we did real work or hit a dedupe skip.
-    # Fetch failures are left unmarked so next poll retries them.
-    if processed or any_work_attempted:
-        state["processed_ids"].append(msg_id)
-        state["processed_ids"] = state["processed_ids"][-2000:]
-        save_state(state)
-
-    return processed
+    return any_work
 
 
 def poll_once(state: dict) -> None:
-    messages = read_messages(after_id=state.get("last_message_id"))
+    cmd = ["clawdbot", "message", "read", "--channel", "discord",
+           "--target", WHISPER_CHANNEL, "--json", "--limit", "20"]
+    after = state.get("last_message_id")
+    if after:
+        cmd += ["--after", after]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[whisper-watcher] clawdbot read failed: {result.stderr.strip()}")
+        return
+
+    try:
+        data = json.loads(result.stdout)
+        messages = data["payload"]["messages"]
+    except Exception as e:
+        print(f"[whisper-watcher] parse error: {e}")
+        return
+
     if not messages:
         return
 
-    # Track latest seen ID regardless of whether we process anything
     latest_id = max(m["id"] for m in messages)
     state["last_message_id"] = latest_id
 
@@ -292,19 +455,17 @@ def poll_once(state: dict) -> None:
         if msg["id"] in processed_ids:
             continue
 
-        # Gate 1: must be from George
         if not is_from_george(msg):
             continue
 
+        msg_content = msg.get("content", "")
         has_video = any(a.get("content_type", "").startswith("video/") for a in msg.get("attachments", []))
-        has_url = bool(extract_urls(msg.get("content", "")))
+        has_url = bool(extract_urls(msg_content))
         if not (has_video or has_url):
             continue
 
-        # Gate 2: must contain explicit trigger or dispatch JSON
-        content = msg.get("content", "")
-        if not has_trigger(content):
-            print(f"[whisper-watcher] Skipping msg {msg['id']} — no explicit trigger from George")
+        if not has_trigger(msg_content):
+            print(f"[whisper-watcher] Skipping msg {msg['id']} — no explicit trigger")
             continue
 
         process_message(msg, state)
@@ -313,10 +474,10 @@ def poll_once(state: dict) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="whisper-watcher: Discord #whisper listener (explicit-trigger mode)")
+    parser = argparse.ArgumentParser(description="whisper-watcher: Discord #whisper listener")
     parser.add_argument("--once", action="store_true", help="Poll once and exit")
     parser.add_argument("--disable-quiet-mode", action="store_true",
-                        help="Remove the quiet-mode sentinel and resume normal posting")
+                        help="Remove .whisper_quiet_mode sentinel and resume normal posting")
     args = parser.parse_args()
 
     if args.disable_quiet_mode:
@@ -326,6 +487,7 @@ def main():
         else:
             print("[whisper-watcher] QUIET_MODE was not active.")
 
+    # Process-level singleton lock
     lock_fp = open(LOCK_FILE, "w")
     try:
         fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -333,9 +495,13 @@ def main():
         print("[whisper-watcher] Another instance is already running. Exiting.")
         sys.exit(1)
 
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     state = load_state()
-    print(f"[whisper-watcher] Starting (explicit-trigger mode). Watching #whisper ({WHISPER_CHANNEL})")
-    print(f"[whisper-watcher] Only processing requests from George ({GEORGE_USER_ID}) with explicit trigger.")
+
+    print(f"[whisper-watcher] Starting. Channel: #whisper ({WHISPER_CHANNEL})")
+    print(f"[whisper-watcher] George-only, explicit-trigger mode. Debounce: {DEBOUNCE_SECONDS}s.")
+    if is_quiet_mode():
+        print("[whisper-watcher] QUIET_MODE active — Working… placeholders suppressed.")
 
     if args.once:
         poll_once(state)
@@ -344,7 +510,7 @@ def main():
     try:
         while True:
             poll_once(state)
-            print(f"[whisper-watcher] Sleeping {POLL_INTERVAL}s...")
+            print(f"[whisper-watcher] Sleeping {POLL_INTERVAL}s…")
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
         print("\n[whisper-watcher] Stopped.")

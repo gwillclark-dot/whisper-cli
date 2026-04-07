@@ -1,5 +1,8 @@
 .env
 .whisper_state/
+.whisper_quiet_mode
+.whisper_watcher.lock
+.whisper_watcher_state.json
 __pycache__/
 *.pyc
 *.egg-info/
