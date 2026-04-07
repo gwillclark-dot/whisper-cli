@@ -26,6 +26,8 @@ Run manually:  python3 whisper_watcher.py
 Run once:      python3 whisper_watcher.py --once
 """
 
+from __future__ import annotations
+
 import argparse
 import fcntl
 import hashlib
