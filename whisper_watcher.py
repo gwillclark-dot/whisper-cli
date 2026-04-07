@@ -19,6 +19,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from whisper_cli.dedupe import file_hash, has_override, is_duplicate, mark_processed as dedupe_mark
+
 # ── Config ────────────────────────────────────────────────────────────────
 
 WHISPER_CHANNEL = "1490901110414905580"
@@ -108,7 +111,6 @@ def download_url(url: str, dest_dir: Path) -> Path:
 
 def transcribe_and_summarize(video_path: Path) -> str:
     """Run transcription + summarization, return formatted result."""
-    sys.path.insert(0, str(Path(__file__).parent))
     from whisper_cli.config import load_config
     from whisper_cli.transcriber import transcribe
     from whisper_cli.summarizer import summarize
@@ -145,6 +147,7 @@ def process_message(msg: dict, state: dict) -> bool:
     msg_id = msg["id"]
     content = msg.get("content", "")
     attachments = msg.get("attachments", [])
+    force = has_override(content)
 
     # Mark processed BEFORE doing work to prevent duplicate posts on crash/retry
     state["processed_ids"].append(msg_id)
@@ -160,11 +163,23 @@ def process_message(msg: dict, state: dict) -> bool:
         for att in attachments:
             if not att.get("content_type", "").startswith("video/"):
                 continue
-            print(f"[whisper-watcher] Attachment: {att['filename']} ({att['size']//1024}KB)")
+            source_id = att["filename"]
+            print(f"[whisper-watcher] Attachment: {source_id} ({att['size']//1024}KB)")
+
+            if not force and is_duplicate(source_id, "file"):
+                print(f"[whisper-watcher] Dedupe: {source_id} already processed within 24h")
+                post_to_whisper(
+                    f"⚠️ Looks like the last item (`{source_id}`) is the same as this one. "
+                    "Re-run? Reply: process anyway"
+                )
+                continue
+
             try:
                 video_path = download_attachment(att["url"], tmp)
+                content_hash = file_hash(video_path)
                 summary = transcribe_and_summarize(video_path)
                 post_to_whisper(f"**{att['filename']}**\n{summary}")
+                dedupe_mark(source_id, "file", content_hash)
                 processed = True
             except Exception as e:
                 print(f"[whisper-watcher] Failed: {e}")
@@ -172,12 +187,24 @@ def process_message(msg: dict, state: dict) -> bool:
 
         # Process YouTube/TikTok URLs
         for url in extract_urls(content):
-            print(f"[whisper-watcher] URL: {url}")
+            source_id = url.rstrip("/")
+            print(f"[whisper-watcher] URL: {source_id}")
+
+            if not force and is_duplicate(source_id, "url"):
+                print(f"[whisper-watcher] Dedupe: URL already processed within 24h")
+                short_url = source_id[:60] + "..." if len(source_id) > 60 else source_id
+                post_to_whisper(
+                    f"⚠️ Looks like the last item (`{short_url}`) is the same as this one. "
+                    "Re-run? Reply: process anyway"
+                )
+                continue
+
             try:
                 video_path = download_url(url, tmp)
                 summary = transcribe_and_summarize(video_path)
                 short_url = url[:60] + "..." if len(url) > 60 else url
                 post_to_whisper(f"**{short_url}**\n{summary}")
+                dedupe_mark(source_id, "url")
                 processed = True
             except Exception as e:
                 print(f"[whisper-watcher] Failed: {e}")
