@@ -229,6 +229,22 @@ def download_url(url: str, dest_dir: Path) -> Path:
     return path
 
 
+# ── Snippety update ───────────────────────────────────────────────────────
+
+def _update_snippety(video_path: Path, summary: str) -> None:
+    """Append/update Snippety CSV with this video's summary, if SNIPPETY_CSV_PATH is set."""
+    try:
+        from whisper_cli.config import load_config
+        from whisper_cli.snippety import export_snippets_csv
+        cfg = load_config()
+        if not cfg.snippety_csv_path:
+            return
+        export_snippets_csv({video_path.stem: summary}, cfg.snippety_csv_path)
+        print(f"[whisper-watcher] Snippety updated: {cfg.snippety_csv_path}")
+    except Exception as e:
+        print(f"[whisper-watcher] Snippety update failed (non-fatal): {e}")
+
+
 # ── Transcribe + Summarize ────────────────────────────────────────────────
 
 def transcribe_and_summarize(video_path: Path, discord_msg_id: str | None) -> str:
@@ -346,6 +362,9 @@ def process_source(
 
         # Transcribe + summarize (retries reuse discord_msg_id)
         summary = transcribe_and_summarize(video_path, discord_msg_id)
+
+        # Auto-update Snippety CSV
+        _update_snippety(video_path, summary)
 
         # Build final message
         short = source_label[:60] + "…" if len(source_label) > 60 else source_label
