@@ -11,6 +11,7 @@ Run once:      python3 whisper_watcher.py --once
 """
 
 import argparse
+import fcntl
 import json
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from pathlib import Path
 
 WHISPER_CHANNEL = "1490901110414905580"
 STATE_FILE = Path(__file__).parent / ".whisper_watcher_state.json"
+LOCK_FILE = Path(__file__).parent / ".whisper_watcher.lock"
 POLL_INTERVAL = 30  # seconds
 
 # ── State ─────────────────────────────────────────────────────────────────
@@ -144,6 +146,11 @@ def process_message(msg: dict, state: dict) -> bool:
     content = msg.get("content", "")
     attachments = msg.get("attachments", [])
 
+    # Mark processed BEFORE doing work to prevent duplicate posts on crash/retry
+    state["processed_ids"].append(msg_id)
+    state["processed_ids"] = state["processed_ids"][-2000:]
+    save_state(state)
+
     processed = False
 
     with tempfile.TemporaryDirectory(prefix="whisper_dl_") as tmpdir:
@@ -176,10 +183,6 @@ def process_message(msg: dict, state: dict) -> bool:
                 print(f"[whisper-watcher] Failed: {e}")
                 post_to_whisper(f"⚠️ Failed to process URL: {e}")
 
-    state["processed_ids"].append(msg_id)
-    # Keep only last 500 IDs
-    state["processed_ids"] = state["processed_ids"][-500:]
-    save_state(state)
     return processed
 
 
@@ -210,6 +213,13 @@ def main():
     parser.add_argument("--once", action="store_true", help="Poll once and exit")
     args = parser.parse_args()
 
+    lock_fp = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("[whisper-watcher] Another instance is already running. Exiting.")
+        sys.exit(1)
+
     state = load_state()
     print(f"[whisper-watcher] Starting. Watching #whisper ({WHISPER_CHANNEL})")
 
@@ -224,6 +234,9 @@ def main():
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
         print("\n[whisper-watcher] Stopped.")
+    finally:
+        fcntl.flock(lock_fp, fcntl.LOCK_UN)
+        lock_fp.close()
 
 
 if __name__ == "__main__":

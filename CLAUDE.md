@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-> Coding instructions for Claude Code in this repository.
+> Coding instructions for Coder in this repository.
 
 ## Project Overview
 Video transcription bot. Drop a video file, YouTube link, or TikTok link in the #whisper Discord channel — it gets downloaded, transcribed via Whisper, then summarized with heavy quoting. Snippety CSV updated for persistent snippet access. Future: video editing from notes.
