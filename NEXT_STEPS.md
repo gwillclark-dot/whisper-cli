@@ -5,7 +5,7 @@
 ## Current Sprint
 
 - [x] Rewrite summarizer prompt for quote-heavy output (pull direct phrases from transcript, not just paraphrase)
-- [ ] Add URL support — yt-dlp download for YouTube and TikTok links before transcription
+- [x] Add URL support — yt-dlp download for YouTube and TikTok links before transcription (`vidsum url <URL>`)
 - [ ] Add Discord listener — watch #whisper for attachments and URLs, auto-process incoming media
 - [ ] Post transcription results back to #whisper via clawdbot
 

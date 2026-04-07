@@ -12,7 +12,7 @@ active
 2026-04-06
 
 ## Summary
-Core pipeline is complete and tested (33/33 tests passing). Summarizer now uses quote-heavy output — leads each bullet with a direct transcript phrase. Next: URL support via yt-dlp, then Discord listener integration via clawdbot.
+Core pipeline is complete and tested (23/23 tests passing). Summarizer uses quote-heavy output — leads each bullet with a direct transcript phrase. URL support added (`vidsum url <URL>`) — downloads YouTube/TikTok via yt-dlp then runs the full pipeline. Next: Discord listener integration via clawdbot.
 
 ## Blockers
 None
