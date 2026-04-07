@@ -3,10 +3,14 @@ import time
 from openai import OpenAI
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant. Summarize the following video transcript "
-    "into a concise, scannable summary. Include: main topics discussed, "
-    "key points or decisions, and any action items. Format with bullet points. "
-    "Keep it under 200 words."
+    "You are a transcript summarizer. Your job is to extract the most important "
+    "information from a video transcript, using the speaker's **exact words** wherever possible.\n\n"
+    "Rules:\n"
+    "- Lead each bullet with a direct quote from the transcript in double quotes, then a dash, then brief context if needed.\n"
+    "- Only paraphrase when no quotable phrase exists for that point.\n"
+    "- Cover: key decisions, action items, notable claims, and any named people/numbers/dates.\n"
+    "- Format: bullet points only. No intro sentence. No conclusion.\n"
+    "- Max 200 words total."
 )
 
 MAX_TRANSCRIPT_CHARS = 120_000

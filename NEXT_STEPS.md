@@ -1,0 +1,24 @@
+# Next Steps
+
+> Task queue — ordered by priority. Top item = next action.
+
+## Current Sprint
+
+- [x] Rewrite summarizer prompt for quote-heavy output (pull direct phrases from transcript, not just paraphrase)
+- [ ] Add URL support — yt-dlp download for YouTube and TikTok links before transcription
+- [ ] Add Discord listener — watch #whisper for attachments and URLs, auto-process incoming media
+- [ ] Post transcription results back to #whisper via clawdbot
+
+## Backlog
+
+- [ ] Video editing from notes — take timestamped notes, cut/clip video segments via ffmpeg
+- [ ] Chunked summarization for long videos (segment transcript, summarize chunks, then meta-summary)
+- [ ] Snippety persistent file auto-update on each transcription
+
+## Completed
+
+- [x] Core transcription pipeline (Whisper + gpt-4o-mini summarization)
+- [x] State tracking (idempotent reprocessing, error retry)
+- [x] CLI commands (run, watch, list, reset)
+- [x] Snippety CSV export
+- [x] Unit + integration + behavioral test suite (23 tests)
