@@ -6,8 +6,8 @@
 
 - [x] Rewrite summarizer prompt for quote-heavy output (pull direct phrases from transcript, not just paraphrase)
 - [x] Add URL support — yt-dlp download for YouTube and TikTok links before transcription (`vidsum url <URL>`)
-- [ ] Add Discord listener — watch #whisper for attachments and URLs, auto-process incoming media
-- [ ] Post transcription results back to #whisper via clawdbot
+- [x] Add Discord listener — `whisper_watcher.py` polls #whisper for attachments/URLs, auto-processes and posts summary back
+- [x] Post transcription results back to #whisper via clawdbot
 
 ## Backlog
 

@@ -1,6 +1,6 @@
 """Layer 2: Pipeline integration tests — mocked external services."""
 
-import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,51 +17,47 @@ from whisper_cli.state import (
     state_path,
 )
 
-# Mock the whisper module before any import of transcriber
-_mock_whisper_module = MagicMock()
-sys.modules.setdefault("whisper", _mock_whisper_module)
-
 
 class TestTranscriptionPipeline:
-    """Test the transcription wrapper with mocked whisper model."""
+    """Test the transcription wrapper with mocked OpenAI Whisper API."""
 
-    def setup_method(self):
-        # Reset the cached models and the mock before each test
-        from whisper_cli.transcriber import _models
-        _models.clear()
-        _mock_whisper_module.reset_mock()
-
-    def test_transcribe_returns_stripped_text(self):
+    @patch("whisper_cli.transcriber.OpenAI")
+    def test_transcribe_returns_stripped_text(self, mock_openai_cls, tmp_path):
         from whisper_cli.transcriber import transcribe
 
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "  Hello world  "}
-        _mock_whisper_module.load_model.return_value = mock_model
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"x" * 100)  # small fake file
 
-        result = transcribe(Path("/fake/video.mp4"), "tiny")
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.audio.transcriptions.create.return_value = "  Hello world  "
+
+        result = transcribe(video, api_key="fake-key")
         assert result == "Hello world"
-        mock_model.transcribe.assert_called_once_with("/fake/video.mp4")
 
-    def test_model_caching(self):
+    @patch("whisper_cli.transcriber.OpenAI")
+    def test_transcribe_empty_result(self, mock_openai_cls, tmp_path):
         from whisper_cli.transcriber import transcribe
 
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "text"}
-        _mock_whisper_module.load_model.return_value = mock_model
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"x" * 100)
 
-        transcribe(Path("/fake/a.mp4"), "tiny")
-        transcribe(Path("/fake/b.mp4"), "tiny")
-        _mock_whisper_module.load_model.assert_called_once_with("tiny")
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.audio.transcriptions.create.return_value = "   "
 
-    def test_transcribe_empty_result(self):
-        from whisper_cli.transcriber import transcribe
-
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "  "}
-        _mock_whisper_module.load_model.return_value = mock_model
-
-        result = transcribe(Path("/fake/video.mp4"), "tiny")
+        result = transcribe(video, api_key="fake-key")
         assert result == ""
+
+    def test_transcribe_rejects_oversized_file(self, tmp_path):
+        from whisper_cli.transcriber import WHISPER_API_MAX_BYTES, transcribe
+
+        video = tmp_path / "big.mp4"
+        # Create a file that exceeds the 25MB limit
+        video.write_bytes(b"x" * (WHISPER_API_MAX_BYTES + 1))
+
+        with pytest.raises(ValueError, match="too large"):
+            transcribe(video, api_key="fake-key")
 
 
 class TestSummarizationPipeline:
@@ -147,13 +143,9 @@ class TestSummarizationPipeline:
 class TestEndToEndPipeline:
     """Test the full scan → filter → (mock transcribe) → (mock summarize) → state flow."""
 
-    def setup_method(self):
-        from whisper_cli.transcriber import _models
-        _models.clear()
-        _mock_whisper_module.reset_mock()
-
     @patch("whisper_cli.summarizer.OpenAI")
-    def test_full_pipeline_writes_outputs(self, mock_openai_cls, tmp_path):
+    @patch("whisper_cli.transcriber.OpenAI")
+    def test_full_pipeline_writes_outputs(self, mock_transcriber_cls, mock_openai_cls, tmp_path):
         from whisper_cli.scanner import scan_folder
         from whisper_cli.summarizer import summarize
         from whisper_cli.transcriber import transcribe
@@ -163,12 +155,12 @@ class TestEndToEndPipeline:
         videos_dir.mkdir()
         (videos_dir / "meeting.mp4").write_bytes(b"fake video content")
 
-        # Mock whisper
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "We discussed the Q2 roadmap and agreed on three priorities."}
-        _mock_whisper_module.load_model.return_value = mock_model
+        # Mock Whisper API
+        mock_t_client = MagicMock()
+        mock_transcriber_cls.return_value = mock_t_client
+        mock_t_client.audio.transcriptions.create.return_value = "We discussed the Q2 roadmap and agreed on three priorities."
 
-        # Mock OpenAI
+        # Mock OpenAI summarizer
         mock_client = MagicMock()
         mock_openai_cls.return_value = mock_client
         mock_choice = MagicMock()
@@ -190,7 +182,7 @@ class TestEndToEndPipeline:
         summ_dir.mkdir(parents=True, exist_ok=True)
 
         for v in pending:
-            transcript = transcribe(v.path, "tiny")
+            transcript = transcribe(v.path, api_key="fake-key")
             (trans_dir / f"{v.path.stem}.txt").write_text(transcript)
 
             summary = summarize(transcript, v.path.name, "fake-key")
@@ -215,7 +207,8 @@ class TestEndToEndPipeline:
         pending2 = get_unprocessed(videos2, reloaded)
         assert len(pending2) == 0
 
-    def test_pipeline_handles_transcription_failure(self, tmp_path):
+    @patch("whisper_cli.transcriber.OpenAI")
+    def test_pipeline_handles_transcription_failure(self, mock_openai_cls, tmp_path):
         from whisper_cli.scanner import scan_folder
         from whisper_cli.transcriber import transcribe
 
@@ -223,9 +216,9 @@ class TestEndToEndPipeline:
         videos_dir.mkdir()
         (videos_dir / "corrupt.mp4").write_bytes(b"not a real video")
 
-        mock_model = MagicMock()
-        mock_model.transcribe.side_effect = RuntimeError("ffmpeg decode error")
-        _mock_whisper_module.load_model.return_value = mock_model
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.audio.transcriptions.create.side_effect = RuntimeError("API error")
 
         base = output_base(videos_dir)
         sp = state_path(base)
@@ -234,15 +227,15 @@ class TestEndToEndPipeline:
 
         for v in videos:
             try:
-                transcribe(v.path, "tiny")
+                transcribe(v.path, api_key="fake-key")
             except RuntimeError:
-                mark_processed(state, v, "error_transcribe", error="ffmpeg decode error")
+                mark_processed(state, v, "error_transcribe", error="API error")
                 save_state(state, sp)
 
         reloaded = load_state(sp)
         entry = list(reloaded.processed.values())[0]
         assert entry.status == "error_transcribe"
-        assert entry.error == "ffmpeg decode error"
+        assert entry.error == "API error"
 
         # Error entries are retried on next run
         videos2 = scan_folder(videos_dir)

@@ -102,7 +102,7 @@ def _process_videos(
         # Transcribe
         console.print(f"\n[cyan][{i}/{len(pending)}] Transcribing[/cyan] {name}  ({_human_size(v.size_bytes)})")
         try:
-            transcript = transcribe(v.path, model)
+            transcript = transcribe(v.path, model, api_key=cfg.openai_api_key)
         except Exception as e:
             console.print(f"[red]Transcription failed:[/red] {e}")
             mark_processed(state, v, "error_transcribe", error=str(e))
