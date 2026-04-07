@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-whisper_watcher.py — Discord #whisper listener.
+whisper_watcher.py — Discord #whisper listener (explicit-trigger mode).
 
-Polls #whisper for new messages with video attachments or YouTube/TikTok URLs.
-Downloads each, transcribes via Whisper API, summarizes via GPT-4o-mini,
-and posts the result back to #whisper.
+Polls #whisper for new messages but only processes when:
+  1. The message is from George (GEORGE_USER_ID).
+  2. The message contains an explicit trigger keyword or dispatch JSON.
+
+Trigger keywords: summarize, tl;dr, tldr, transcribe, process
+Dispatch JSON:    {"action": "process"} (or "transcribe" / "summarize")
+Dedupe override:  include "process anyway" or "retry" to bypass 24h dedupe.
+
+Auto-watch (no explicit prompt) is DISABLED.
 
 Run manually:  python3 whisper_watcher.py
 Run once:      python3 whisper_watcher.py --once
@@ -28,6 +34,12 @@ WHISPER_CHANNEL = "1490901110414905580"
 STATE_FILE = Path(__file__).parent / ".whisper_watcher_state.json"
 LOCK_FILE = Path(__file__).parent / ".whisper_watcher.lock"
 POLL_INTERVAL = 30  # seconds
+
+# Only messages from this user will trigger processing.
+GEORGE_USER_ID = "732025456617979925"
+
+# Explicit trigger keywords (any substring match, case-insensitive).
+TRIGGER_KEYWORDS = ("summarize", "tl;dr", "tldr", "transcribe", "process")
 
 # ── State ─────────────────────────────────────────────────────────────────
 
@@ -140,21 +152,43 @@ def extract_urls(content: str) -> list[str]:
     return urls
 
 
+# ── Gate checks ───────────────────────────────────────────────────────────
+
+def is_from_george(msg: dict) -> bool:
+    """Return True if the message author is George. Rejects if author unknown."""
+    author = msg.get("author") or {}
+    return str(author.get("id", "")) == GEORGE_USER_ID
+
+
+def has_trigger(content: str) -> bool:
+    """Return True if content contains an explicit processing trigger or dispatch JSON."""
+    lower = content.lower()
+    if any(kw in lower for kw in TRIGGER_KEYWORDS):
+        return True
+    # Dispatch JSON: {"action": "process"} / {"action": "transcribe"} etc.
+    try:
+        data = json.loads(content.strip())
+        return isinstance(data, dict) and data.get("action") in ("process", "transcribe", "summarize")
+    except Exception:
+        return False
+
+
 # ── Main Loop ─────────────────────────────────────────────────────────────
 
 def process_message(msg: dict, state: dict) -> bool:
-    """Process a single message. Returns True if anything was processed."""
+    """Process a single message. Returns True if anything was processed.
+
+    Note: msg_id is added to processed_ids AFTER work completes (not before).
+    Fetch failures are NOT marked processed so they can be retried next poll.
+    Dedupe skips ARE marked processed to prevent repeated nag messages.
+    """
     msg_id = msg["id"]
     content = msg.get("content", "")
     attachments = msg.get("attachments", [])
     force = has_override(content)
 
-    # Mark processed BEFORE doing work to prevent duplicate posts on crash/retry
-    state["processed_ids"].append(msg_id)
-    state["processed_ids"] = state["processed_ids"][-2000:]
-    save_state(state)
-
     processed = False
+    any_work_attempted = False
 
     with tempfile.TemporaryDirectory(prefix="whisper_dl_") as tmpdir:
         tmp = Path(tmpdir)
@@ -172,8 +206,10 @@ def process_message(msg: dict, state: dict) -> bool:
                     f"⚠️ Looks like the last item (`{source_id}`) is the same as this one. "
                     "Re-run? Reply: process anyway"
                 )
+                any_work_attempted = True  # mark so we don't nag again
                 continue
 
+            any_work_attempted = True
             try:
                 video_path = download_attachment(att["url"], tmp)
                 content_hash = file_hash(video_path)
@@ -184,6 +220,7 @@ def process_message(msg: dict, state: dict) -> bool:
             except Exception as e:
                 print(f"[whisper-watcher] Failed: {e}")
                 post_to_whisper(f"⚠️ Failed to process `{att['filename']}`: {e}")
+                # Do NOT mark msg_id processed — fetch failures are retryable
 
         # Process YouTube/TikTok URLs
         for url in extract_urls(content):
@@ -197,8 +234,10 @@ def process_message(msg: dict, state: dict) -> bool:
                     f"⚠️ Looks like the last item (`{short_url}`) is the same as this one. "
                     "Re-run? Reply: process anyway"
                 )
+                any_work_attempted = True
                 continue
 
+            any_work_attempted = True
             try:
                 video_path = download_url(url, tmp)
                 summary = transcribe_and_summarize(video_path)
@@ -209,6 +248,14 @@ def process_message(msg: dict, state: dict) -> bool:
             except Exception as e:
                 print(f"[whisper-watcher] Failed: {e}")
                 post_to_whisper(f"⚠️ Failed to process URL: {e}")
+                # Do NOT mark msg_id processed — fetch failures are retryable
+
+    # Only mark as seen if we did real work or hit a dedupe skip.
+    # Fetch failures are left unmarked so next poll retries them.
+    if processed or any_work_attempted:
+        state["processed_ids"].append(msg_id)
+        state["processed_ids"] = state["processed_ids"][-2000:]
+        save_state(state)
 
     return processed
 
@@ -218,25 +265,37 @@ def poll_once(state: dict) -> None:
     if not messages:
         return
 
-    # Track latest seen ID
+    # Track latest seen ID regardless of whether we process anything
     latest_id = max(m["id"] for m in messages)
     state["last_message_id"] = latest_id
 
-    # Filter to unprocessed messages that have actionable content
     processed_ids = set(state.get("processed_ids", []))
     for msg in sorted(messages, key=lambda m: m["id"]):
         if msg["id"] in processed_ids:
             continue
+
+        # Gate 1: must be from George
+        if not is_from_george(msg):
+            continue
+
         has_video = any(a.get("content_type", "").startswith("video/") for a in msg.get("attachments", []))
         has_url = bool(extract_urls(msg.get("content", "")))
-        if has_video or has_url:
-            process_message(msg, state)
+        if not (has_video or has_url):
+            continue
+
+        # Gate 2: must contain explicit trigger or dispatch JSON
+        content = msg.get("content", "")
+        if not has_trigger(content):
+            print(f"[whisper-watcher] Skipping msg {msg['id']} — no explicit trigger from George")
+            continue
+
+        process_message(msg, state)
 
     save_state(state)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="whisper-watcher: Discord #whisper listener")
+    parser = argparse.ArgumentParser(description="whisper-watcher: Discord #whisper listener (explicit-trigger mode)")
     parser.add_argument("--once", action="store_true", help="Poll once and exit")
     args = parser.parse_args()
 
@@ -248,7 +307,8 @@ def main():
         sys.exit(1)
 
     state = load_state()
-    print(f"[whisper-watcher] Starting. Watching #whisper ({WHISPER_CHANNEL})")
+    print(f"[whisper-watcher] Starting (explicit-trigger mode). Watching #whisper ({WHISPER_CHANNEL})")
+    print(f"[whisper-watcher] Only processing requests from George ({GEORGE_USER_ID}) with explicit trigger.")
 
     if args.once:
         poll_once(state)

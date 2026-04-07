@@ -18,7 +18,8 @@ from typing import Optional
 STATE_DIR = Path(__file__).parent.parent / ".whisper_state"
 LAST_PROCESSED_FILE = STATE_DIR / "last_processed.json"
 WINDOW_HOURS = 24
-OVERRIDE_PHRASE = "process anyway"
+OVERRIDE_PHRASES = ("process anyway", "retry")
+OVERRIDE_PHRASE = "process anyway"  # kept for backwards-compat
 
 
 def _load() -> dict:
@@ -74,5 +75,6 @@ def mark_processed(source_id: str, source_type: str, content_hash: Optional[str]
 
 
 def has_override(message_content: str) -> bool:
-    """Return True if message contains the override phrase."""
-    return OVERRIDE_PHRASE in message_content.lower()
+    """Return True if message contains an override phrase ('process anyway' or 'retry')."""
+    lower = message_content.lower()
+    return any(phrase in lower for phrase in OVERRIDE_PHRASES)
