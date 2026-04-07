@@ -35,6 +35,15 @@ STATE_FILE = Path(__file__).parent / ".whisper_watcher_state.json"
 LOCK_FILE = Path(__file__).parent / ".whisper_watcher.lock"
 POLL_INTERVAL = 30  # seconds
 
+# QUIET_MODE: when this file exists, all Discord posts from this watcher are
+# suppressed and in-flight jobs short-circuit before posting.
+# To re-enable: delete .whisper_quiet_mode or run with --disable-quiet-mode.
+QUIET_MODE_FILE = Path(__file__).parent / ".whisper_quiet_mode"
+
+
+def is_quiet_mode() -> bool:
+    return QUIET_MODE_FILE.exists()
+
 # Only messages from this user will trigger processing.
 GEORGE_USER_ID = "732025456617979925"
 
@@ -76,6 +85,9 @@ def read_messages(after_id: str | None = None) -> list[dict]:
 
 
 def post_to_whisper(message: str) -> None:
+    if is_quiet_mode():
+        print(f"[whisper-watcher] QUIET_MODE active — suppressed post: {message[:80]!r}")
+        return
     subprocess.run(
         ["clawdbot", "message", "send", "--channel", "discord",
          "--target", WHISPER_CHANNEL, "--message", message],
@@ -213,6 +225,9 @@ def process_message(msg: dict, state: dict) -> bool:
             try:
                 video_path = download_attachment(att["url"], tmp)
                 content_hash = file_hash(video_path)
+                if is_quiet_mode():
+                    print(f"[whisper-watcher] QUIET_MODE active — aborting job for {att['filename']}")
+                    continue
                 summary = transcribe_and_summarize(video_path)
                 post_to_whisper(f"**{att['filename']}**\n{summary}")
                 dedupe_mark(source_id, "file", content_hash)
@@ -240,6 +255,9 @@ def process_message(msg: dict, state: dict) -> bool:
             any_work_attempted = True
             try:
                 video_path = download_url(url, tmp)
+                if is_quiet_mode():
+                    print(f"[whisper-watcher] QUIET_MODE active — aborting job for {url[:60]}")
+                    continue
                 summary = transcribe_and_summarize(video_path)
                 short_url = url[:60] + "..." if len(url) > 60 else url
                 post_to_whisper(f"**{short_url}**\n{summary}")
@@ -297,7 +315,16 @@ def poll_once(state: dict) -> None:
 def main():
     parser = argparse.ArgumentParser(description="whisper-watcher: Discord #whisper listener (explicit-trigger mode)")
     parser.add_argument("--once", action="store_true", help="Poll once and exit")
+    parser.add_argument("--disable-quiet-mode", action="store_true",
+                        help="Remove the quiet-mode sentinel and resume normal posting")
     args = parser.parse_args()
+
+    if args.disable_quiet_mode:
+        if QUIET_MODE_FILE.exists():
+            QUIET_MODE_FILE.unlink()
+            print("[whisper-watcher] QUIET_MODE disabled — resuming normal operation.")
+        else:
+            print("[whisper-watcher] QUIET_MODE was not active.")
 
     lock_fp = open(LOCK_FILE, "w")
     try:
