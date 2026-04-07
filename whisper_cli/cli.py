@@ -1,5 +1,4 @@
 import signal
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +9,6 @@ from rich.console import Console
 from rich.table import Table
 
 from whisper_cli.config import Config, check_ffmpeg, load_config
-from whisper_cli.downloader import download, is_supported_url
 from whisper_cli.scanner import scan_folder
 from whisper_cli.state import (
     get_unprocessed,
@@ -102,7 +100,7 @@ def _process_videos(
         # Transcribe
         console.print(f"\n[cyan][{i}/{len(pending)}] Transcribing[/cyan] {name}  ({_human_size(v.size_bytes)})")
         try:
-            transcript = transcribe(v.path, model, api_key=cfg.openai_api_key)
+            transcript = transcribe(v.path, model)
         except Exception as e:
             console.print(f"[red]Transcription failed:[/red] {e}")
             mark_processed(state, v, "error_transcribe", error=str(e))
@@ -239,34 +237,6 @@ def list_videos(
     console.print(table)
     if pending:
         console.print(f"\n[bold]{len(pending)} unprocessed video(s)[/bold]")
-
-
-@app.command()
-def url(
-    source_url: str = typer.Argument(..., help="YouTube or TikTok URL"),
-    model: str = typer.Option("base", "--model", "-m", help="Whisper model"),
-    no_summary: bool = typer.Option(False, "--no-summary", help="Skip summarization"),
-    no_snippet: bool = typer.Option(False, "--no-snippet", help="Skip Snippety update"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output dir"),
-):
-    """Download a YouTube or TikTok URL, transcribe, and summarize."""
-    if not is_supported_url(source_url):
-        raise typer.BadParameter(
-            f"Unsupported URL. Supported: YouTube, TikTok.\nGot: {source_url}"
-        )
-
-    with tempfile.TemporaryDirectory(prefix="whisper_dl_") as tmpdir:
-        tmp_path = Path(tmpdir)
-        console.print(f"[cyan]Downloading[/cyan] {source_url}")
-        try:
-            video_path = download(source_url, tmp_path)
-        except RuntimeError as e:
-            console.print(f"[red]Download failed:[/red] {e}")
-            raise typer.Exit(1)
-
-        console.print(f"[dim]Downloaded:[/dim] {video_path.name}")
-        resolved_output = output.resolve() if output else None
-        _process_videos(tmp_path, model, no_summary, no_snippet, resolved_output, dry_run=False)
 
 
 @app.command()
