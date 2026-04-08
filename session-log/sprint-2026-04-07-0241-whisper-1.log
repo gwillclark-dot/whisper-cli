@@ -1,0 +1,1 @@
+Done. Snippety auto-update is now live in the Discord watcher pipeline. When George drops a video in #whisper and it gets transcribed, the Snippety CSV updates automatically — no separate CLI run needed. 35/35 tests passing.
