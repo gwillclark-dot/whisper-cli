@@ -5,11 +5,24 @@ import shutil
 from pathlib import Path
 
 
-SUPPORTED_DOMAINS = ("youtube.com", "youtu.be", "tiktok.com", "vm.tiktok.com")
+SUPPORTED_DOMAINS = (
+    "youtube.com", "youtu.be",
+    "tiktok.com", "vm.tiktok.com",
+    "twitter.com", "x.com",
+    "instagram.com",
+    "reddit.com", "v.redd.it",
+    "vimeo.com",
+    "twitch.tv",
+)
 
 
 def is_supported_url(url: str) -> bool:
-    return any(domain in url for domain in SUPPORTED_DOMAINS)
+    try:
+        from urllib.parse import urlparse
+        netloc = urlparse(url).netloc.lower().lstrip("www.")
+        return any(netloc == d or netloc.endswith("." + d) for d in SUPPORTED_DOMAINS)
+    except Exception:
+        return False
 
 
 def check_ytdlp() -> None:

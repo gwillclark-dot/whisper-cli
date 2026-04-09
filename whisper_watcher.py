@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from whisper_cli.dedupe import file_hash, has_override, is_duplicate, mark_processed as dedupe_mark
+from whisper_cli.downloader import is_supported_url
 
 # ── Config ────────────────────────────────────────────────────────────────
 
@@ -280,14 +281,12 @@ def transcribe_and_summarize(video_path: Path, discord_msg_id: str | None) -> st
 
 # ── URL Detection ─────────────────────────────────────────────────────────
 
-SUPPORTED_DOMAINS = ("youtube.com", "youtu.be", "tiktok.com", "vm.tiktok.com")
-
-
 def extract_urls(content: str) -> list[str]:
     urls = []
     for word in content.split():
-        if word.startswith("http") and any(d in word for d in SUPPORTED_DOMAINS):
-            urls.append(word.strip("<>"))
+        clean = word.strip("<>")
+        if clean.startswith("http") and is_supported_url(clean):
+            urls.append(clean)
     return urls
 
 

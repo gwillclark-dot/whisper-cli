@@ -344,3 +344,64 @@ class TestClipperParser:
         assert out.name == "video_clip01_test_clip.mp4"
         # dry_run should not actually write the file
         assert not out.exists()
+
+
+# ── Downloader URL detection ──────────────────────────────────────────────
+
+
+class TestDownloaderURLSupport:
+    def test_youtube_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://www.youtube.com/watch?v=abc")
+        assert is_supported_url("https://youtu.be/abc123")
+
+    def test_tiktok_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://www.tiktok.com/@user/video/123")
+        assert is_supported_url("https://vm.tiktok.com/abc")
+
+    def test_twitter_x_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://twitter.com/user/status/123")
+        assert is_supported_url("https://x.com/user/status/123")
+
+    def test_instagram_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://www.instagram.com/reel/abc/")
+
+    def test_reddit_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://www.reddit.com/r/sub/comments/abc/")
+        assert is_supported_url("https://v.redd.it/abc123")
+
+    def test_vimeo_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://vimeo.com/123456")
+
+    def test_twitch_supported(self):
+        from whisper_cli.downloader import is_supported_url
+        assert is_supported_url("https://www.twitch.tv/videos/123456")
+
+    def test_unsupported_domain_rejected(self):
+        from whisper_cli.downloader import is_supported_url
+        assert not is_supported_url("https://example.com/video.mp4")
+        assert not is_supported_url("https://dropbox.com/s/abc/clip.mp4")
+
+    def test_extract_urls_from_discord_message(self):
+        from whisper_watcher import extract_urls
+        msg = "check this out https://twitter.com/user/status/999 and also https://youtu.be/xyz summarize"
+        urls = extract_urls(msg)
+        assert "https://twitter.com/user/status/999" in urls
+        assert "https://youtu.be/xyz" in urls
+
+    def test_extract_urls_strips_angle_brackets(self):
+        from whisper_watcher import extract_urls
+        msg = "process <https://x.com/user/status/123>"
+        urls = extract_urls(msg)
+        assert urls == ["https://x.com/user/status/123"]
+
+    def test_extract_urls_ignores_unsupported(self):
+        from whisper_watcher import extract_urls
+        msg = "see https://example.com/page and https://youtu.be/abc"
+        urls = extract_urls(msg)
+        assert urls == ["https://youtu.be/abc"]
