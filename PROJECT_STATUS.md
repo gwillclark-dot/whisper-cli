@@ -3,16 +3,16 @@
 > Current direction and state of the project.
 
 ## Current Milestone
-Discord listener live — whisper_watcher.py watches #whisper for video attachments/URLs, transcribes, and posts summaries back.
+Feature-complete — all planned backlog items shipped.
 
 ## Status
-active
+finishing
 
 ## Last Updated
-2026-04-06
+2026-04-09
 
 ## Summary
-Discord listener is live (`whisper_watcher.py`). Drop a video in #whisper or paste a YouTube/TikTok URL — watcher polls every 30s, transcribes via Whisper API, summarizes with quote-heavy output, posts back to #whisper. 33/33 tests passing. Transcriber migrated from local model to OpenAI Whisper API (avoids llvmlite install issues).
+Full pipeline live: drop a video/URL in #whisper → transcribed via OpenAI Whisper API → summarized with quote-heavy output → posted back to #whisper → Snippety CSV updated. Supports YouTube, TikTok, Twitter/X, Instagram, Reddit, Vimeo, Twitch. Long videos use chunked summarization. `clip` command cuts video segments from timestamped notes via ffmpeg. 60/60 tests passing (16 skipped — need real API key).
 
 ## Blockers
 None
