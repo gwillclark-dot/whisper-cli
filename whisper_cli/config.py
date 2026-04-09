@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 import os
@@ -9,7 +12,7 @@ import os
 @dataclass
 class Config:
     openai_api_key: str
-    snippety_csv_path: Path | None = None
+    snippety_csv_path: Optional[Path] = None
     whisper_model: str = "base"
     poll_interval: int = 30
 
