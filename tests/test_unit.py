@@ -216,3 +216,70 @@ class TestSnippetyCSV:
         export_snippets_csv({"clip": content}, csv_path)
         rows = self._read_csv(csv_path)
         assert rows[0]["content"] == content
+
+
+# ── Summarizer chunking ───────────────────────────────────────────────────
+
+
+class TestSummarizerChunking:
+    def test_split_chunks_short_text(self):
+        from whisper_cli.summarizer import _split_chunks
+        text = "Hello world. " * 10
+        chunks = _split_chunks(text, chunk_size=1000, overlap=50)
+        assert len(chunks) == 1
+        assert chunks[0] == text
+
+    def test_split_chunks_long_text_produces_multiple(self):
+        from whisper_cli.summarizer import _split_chunks
+        text = "word " * 10_000  # ~50k chars
+        chunks = _split_chunks(text, chunk_size=20_000, overlap=500)
+        assert len(chunks) >= 2
+
+    def test_split_chunks_coverage(self):
+        from whisper_cli.summarizer import _split_chunks
+        text = "abcde " * 5_000  # 30k chars
+        chunks = _split_chunks(text, chunk_size=10_000, overlap=200)
+        # Reconstruct without overlap and verify all content covered
+        assert chunks[0][:100] in text
+        assert chunks[-1][-100:] in text
+        # Last chunk ends at end of text
+        assert text.endswith(chunks[-1])
+
+    def test_split_chunks_overlap_carries_context(self):
+        from whisper_cli.summarizer import _split_chunks
+        text = "x" * 100
+        chunks = _split_chunks(text, chunk_size=60, overlap=30)
+        # With overlap, chunks share content — second chunk starts at 60-30=30
+        assert chunks[1][:10] == text[30:40]
+        # Last chunk ends exactly at end of text
+        assert text.endswith(chunks[-1])
+
+    def test_summarize_routes_short_to_direct(self, monkeypatch):
+        """Short transcripts should make exactly one API call."""
+        from whisper_cli.summarizer import summarize, MAX_DIRECT_CHARS
+        calls = []
+
+        def fake_chat(client, system, user, max_tokens=800):
+            calls.append(("direct", user))
+            return "short summary"
+
+        monkeypatch.setattr("whisper_cli.summarizer._chat", fake_chat)
+        result = summarize("short text", "clip.mp4", "fake-key")
+        assert result == "short summary"
+        assert len(calls) == 1
+
+    def test_summarize_routes_long_to_chunked(self, monkeypatch):
+        """Long transcripts should make N+1 API calls (N chunks + meta-summary)."""
+        from whisper_cli.summarizer import summarize, CHUNK_SIZE
+        calls = []
+
+        def fake_chat(client, system, user, max_tokens=800):
+            calls.append(user)
+            return "chunk extract"
+
+        monkeypatch.setattr("whisper_cli.summarizer._chat", fake_chat)
+        # Create a transcript longer than MAX_DIRECT_CHARS
+        long_text = "word " * 30_000  # ~150k chars
+        result = summarize(long_text, "long.mp4", "fake-key")
+        # Should have called once per chunk + one final meta call
+        assert len(calls) >= 3  # at least 2 chunk extracts + 1 meta

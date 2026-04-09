@@ -96,20 +96,20 @@ class TestSummarizationPipeline:
         assert "my_meeting.mp4" in user_msg
 
     @patch("whisper_cli.summarizer.OpenAI")
-    def test_summarize_truncates_long_transcript(self, mock_openai_cls):
-        from whisper_cli.summarizer import MAX_TRANSCRIPT_CHARS, summarize
+    def test_summarize_chunks_long_transcript(self, mock_openai_cls):
+        from whisper_cli.summarizer import MAX_DIRECT_CHARS, summarize
 
         mock_client = MagicMock()
         mock_openai_cls.return_value = mock_client
         mock_choice = MagicMock()
-        mock_choice.message.content = "summary"
+        mock_choice.message.content = "chunk result"
         mock_client.chat.completions.create.return_value = MagicMock(choices=[mock_choice])
 
-        long_text = "x" * (MAX_TRANSCRIPT_CHARS + 1000)
+        long_text = "word " * 30_000  # ~150k chars, above MAX_DIRECT_CHARS
+        assert len(long_text) > MAX_DIRECT_CHARS
         summarize(long_text, "long.mp4", "fake-key")
-        call_args = mock_client.chat.completions.create.call_args
-        user_msg = call_args.kwargs["messages"][1]["content"]
-        assert "[Transcript truncated]" in user_msg
+        # Should make multiple API calls (chunks + meta-summary)
+        assert mock_client.chat.completions.create.call_count >= 3
 
     @patch("whisper_cli.summarizer.OpenAI")
     def test_summarize_retries_on_failure(self, mock_openai_cls):
