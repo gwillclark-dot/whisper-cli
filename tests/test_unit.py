@@ -283,3 +283,64 @@ class TestSummarizerChunking:
         result = summarize(long_text, "long.mp4", "fake-key")
         # Should have called once per chunk + one final meta call
         assert len(calls) >= 3  # at least 2 chunk extracts + 1 meta
+
+
+# ── Clipper ───────────────────────────────────────────────────────────────
+
+
+class TestClipperParser:
+    def test_parse_mm_ss(self):
+        from whisper_cli.clipper import parse_notes
+        specs = parse_notes("0:30-1:15 intro\n")
+        assert len(specs) == 1
+        assert specs[0].start == 30.0
+        assert specs[0].end == 75.0
+        assert specs[0].label == "intro"
+
+    def test_parse_hh_mm_ss(self):
+        from whisper_cli.clipper import parse_notes
+        specs = parse_notes("1:02:30-1:03:00 key moment\n")
+        assert len(specs) == 1
+        assert specs[0].start == 3750.0
+        assert specs[0].end == 3780.0
+        assert specs[0].label == "key moment"
+
+    def test_parse_raw_seconds(self):
+        from whisper_cli.clipper import parse_notes
+        specs = parse_notes("90-120 segment\n")
+        assert len(specs) == 1
+        assert specs[0].start == 90.0
+        assert specs[0].end == 120.0
+
+    def test_ignores_comments_and_blanks(self):
+        from whisper_cli.clipper import parse_notes
+        text = "# header\n\n0:10-0:30 clip1\n# another comment\n1:00-1:30 clip2\n"
+        specs = parse_notes(text)
+        assert len(specs) == 2
+
+    def test_skips_invalid_lines(self):
+        from whisper_cli.clipper import parse_notes
+        text = "not a timestamp\n0:10-0:30 valid\njust text\n"
+        specs = parse_notes(text)
+        assert len(specs) == 1
+
+    def test_skips_reversed_timestamps(self):
+        from whisper_cli.clipper import parse_notes
+        # end < start should be skipped
+        specs = parse_notes("1:00-0:30 backwards\n")
+        assert len(specs) == 0
+
+    def test_em_dash_separator(self):
+        from whisper_cli.clipper import parse_notes
+        specs = parse_notes("0:30–1:00 clip\n")  # em dash
+        assert len(specs) == 1
+
+    def test_cut_clip_dry_run(self, tmp_path):
+        from whisper_cli.clipper import ClipSpec, cut_clip
+        spec = ClipSpec(start=10.0, end=30.0, label="test clip")
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"fake")
+        out = cut_clip(video, spec, tmp_path, index=1, dry_run=True)
+        assert out.name == "video_clip01_test_clip.mp4"
+        # dry_run should not actually write the file
+        assert not out.exists()

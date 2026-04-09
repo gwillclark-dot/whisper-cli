@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from whisper_cli.clipper import clip_video, parse_notes
 from whisper_cli.config import Config, check_ffmpeg, load_config
 from whisper_cli.scanner import scan_folder
 from whisper_cli.state import (
@@ -268,3 +269,65 @@ def reset(
             state.processed.clear()
             save_state(state, sp)
             console.print("[green]State cleared.[/green]")
+
+
+@app.command()
+def clip(
+    video: Path = typer.Argument(..., help="Video file to cut clips from"),
+    notes: Path = typer.Argument(..., help="Notes file with timestamped clip specs (start-end label, one per line)"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output dir for clips (default: <video_dir>/clips/)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview clips without running ffmpeg"),
+):
+    """Cut clips from a video using timestamped notes.
+
+    Notes file format (one clip per line):
+      MM:SS-MM:SS  label
+      HH:MM:SS-HH:MM:SS  label
+
+    Example:
+      0:30-1:15  intro
+      2:00-3:45  key point
+      # comments and blank lines are ignored
+    """
+    video = video.resolve()
+    notes = notes.resolve()
+
+    if not video.is_file():
+        raise typer.BadParameter(f"Video file not found: {video}")
+    if not notes.is_file():
+        raise typer.BadParameter(f"Notes file not found: {notes}")
+
+    check_ffmpeg()
+
+    notes_text = notes.read_text()
+    specs = parse_notes(notes_text)
+    if not specs:
+        console.print("[yellow]No valid clip specs found in notes file.[/yellow]")
+        console.print("[dim]Expected format: MM:SS-MM:SS label (one per line)[/dim]")
+        raise typer.Exit(1)
+
+    out_dir = output.resolve() if output else video.parent / "clips"
+
+    console.print(f"[bold]{len(specs)} clip(s) from[/bold] {video.name}")
+    console.print(f"[dim]Output → {out_dir}[/dim]")
+
+    if dry_run:
+        for i, s in enumerate(specs, 1):
+            m, sec = divmod(int(s.start), 60)
+            h, m = divmod(m, 60)
+            start_fmt = f"{h:02d}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
+            dur = s.end - s.start
+            console.print(f"  [{i}] {start_fmt}  +{dur:.0f}s  {s.label}")
+        return
+
+    try:
+        outputs = clip_video(video, notes, out_dir)
+    except Exception as e:
+        console.print(f"[red]Clip failed:[/red] {e}")
+        raise typer.Exit(1)
+
+    for i, (spec, path) in enumerate(zip(specs, outputs), 1):
+        dur = spec.end - spec.start
+        console.print(f"  [{i}] [green]✓[/green] {path.name}  ({dur:.0f}s)")
+
+    console.print(f"\n[bold]Done — {len(outputs)} clip(s) saved to {out_dir}[/bold]")

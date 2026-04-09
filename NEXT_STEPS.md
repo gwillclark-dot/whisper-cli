@@ -11,7 +11,7 @@
 
 ## Backlog
 
-- [ ] Video editing from notes — take timestamped notes, cut/clip video segments via ffmpeg
+- [x] Video editing from notes — take timestamped notes, cut/clip video segments via ffmpeg
 - [x] Chunked summarization for long videos (segment transcript, summarize chunks, then meta-summary)
 - [x] Snippety persistent file auto-update on each transcription
 
