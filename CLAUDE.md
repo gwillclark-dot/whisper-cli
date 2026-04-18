@@ -3,7 +3,7 @@
 > Coding instructions for Coder in this repository.
 
 ## Project Overview
-Video transcription bot. Drop a video file, YouTube link, or TikTok link in the #whisper Discord channel — it gets downloaded, transcribed via Whisper, then summarized with heavy quoting. Snippety CSV updated for persistent snippet access. Future: video editing from notes.
+Video transcription bot. Drop a video file, YouTube link, or TikTok link in the #whisper Discord channel — it gets downloaded, transcribed via Whisper, then summarized as a TL;DR (language, duration, 3–6 bullets). Snippety CSV updated for persistent snippet access. Future: video editing from notes.
 
 ## Tech Stack
 - Python 3.13, typer CLI framework
@@ -46,6 +46,6 @@ Discord input flow (to be built): Discord message with attachment/URL → downlo
 ## Rules
 - Commit after each meaningful change
 - Run tests before marking a task complete
-- Summarization must emphasize **direct quoting** — pull actual phrases from transcripts, not just paraphrase
+- Summarization outputs: language, duration, and a 3–6 bullet TL;DR. No quotes section.
 - Update `DECISIONS.md` when making architectural choices
 - Update `NEXT_STEPS.md` when completing or adding tasks

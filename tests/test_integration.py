@@ -35,18 +35,20 @@ class TestTranscriptionPipeline:
         from whisper_cli.transcriber import transcribe
 
         mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "  Hello world  "}
+        mock_model.transcribe.return_value = {"text": "  Hello world  ", "language": "en", "segments": [{"end": 5.0}]}
         _mock_whisper_module.load_model.return_value = mock_model
 
         result = transcribe(Path("/fake/video.mp4"), "tiny")
-        assert result == "Hello world"
+        assert result.text == "Hello world"
+        assert result.language == "en"
+        assert result.duration_secs == 5.0
         mock_model.transcribe.assert_called_once_with("/fake/video.mp4")
 
     def test_model_caching(self):
         from whisper_cli.transcriber import transcribe
 
         mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "text"}
+        mock_model.transcribe.return_value = {"text": "text", "language": "en", "segments": []}
         _mock_whisper_module.load_model.return_value = mock_model
 
         transcribe(Path("/fake/a.mp4"), "tiny")
@@ -57,11 +59,11 @@ class TestTranscriptionPipeline:
         from whisper_cli.transcriber import transcribe
 
         mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "  "}
+        mock_model.transcribe.return_value = {"text": "  ", "language": "unknown", "segments": []}
         _mock_whisper_module.load_model.return_value = mock_model
 
         result = transcribe(Path("/fake/video.mp4"), "tiny")
-        assert result == ""
+        assert result.text == ""
 
 
 class TestSummarizationPipeline:
@@ -165,7 +167,11 @@ class TestEndToEndPipeline:
 
         # Mock whisper
         mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "We discussed the Q2 roadmap and agreed on three priorities."}
+        mock_model.transcribe.return_value = {
+            "text": "We discussed the Q2 roadmap and agreed on three priorities.",
+            "language": "en",
+            "segments": [{"end": 120.0}],
+        }
         _mock_whisper_module.load_model.return_value = mock_model
 
         # Mock OpenAI
@@ -190,13 +196,13 @@ class TestEndToEndPipeline:
         summ_dir.mkdir(parents=True, exist_ok=True)
 
         for v in pending:
-            transcript = transcribe(v.path, "tiny")
-            (trans_dir / f"{v.path.stem}.txt").write_text(transcript)
+            result = transcribe(v.path, "tiny")
+            (trans_dir / f"{v.path.stem}.txt").write_text(result.text)
 
-            summary = summarize(transcript, v.path.name, "fake-key")
+            summary = summarize(result.text, v.path.name, "fake-key")
             (summ_dir / f"{v.path.stem}.txt").write_text(summary)
 
-            mark_processed(state, v, "ok", len(transcript), len(summary))
+            mark_processed(state, v, "ok", len(result.text), len(summary))
             save_state(state, sp)
 
         # Verify outputs

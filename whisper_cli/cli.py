@@ -21,10 +21,17 @@ from whisper_cli.state import (
 )
 from whisper_cli.summarizer import summarize
 from whisper_cli.snippety import export_snippets_csv
-from whisper_cli.transcriber import transcribe
+from whisper_cli.transcriber import TranscriptResult, transcribe
 
 app = typer.Typer(help="Transcribe videos, summarize, export to Snippety.")
 console = Console()
+
+
+def _fmt_duration(secs: float) -> str:
+    total = int(secs)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def _human_size(nbytes: int) -> str:
@@ -101,7 +108,7 @@ def _process_videos(
         # Transcribe
         console.print(f"\n[cyan][{i}/{len(pending)}] Transcribing[/cyan] {name}  ({_human_size(v.size_bytes)})")
         try:
-            transcript = transcribe(v.path, model)
+            result = transcribe(v.path, model)
         except Exception as e:
             console.print(f"[red]Transcription failed:[/red] {e}")
             mark_processed(state, v, "error_transcribe", error=str(e))
@@ -111,7 +118,7 @@ def _process_videos(
 
         # Save transcription
         trans_path = trans_dir / f"{stem}.txt"
-        trans_path.write_text(transcript)
+        trans_path.write_text(result.text)
         console.print(f"  Saved: {trans_path}")
 
         # Summarize
@@ -119,10 +126,12 @@ def _process_videos(
         if not no_summary:
             console.print(f"  [cyan]Summarizing...[/cyan]")
             try:
-                summary = summarize(transcript, name, cfg.openai_api_key)
+                bullets = summarize(result.text, name, cfg.openai_api_key)
+                header = f"Language: {result.language}  |  Duration: {_fmt_duration(result.duration_secs)}\n\n"
+                summary = header + bullets
             except Exception as e:
                 console.print(f"  [red]Summarization failed:[/red] {e}")
-                mark_processed(state, v, "error_summarize", transcript_chars=len(transcript), error=str(e))
+                mark_processed(state, v, "error_summarize", transcript_chars=len(result.text), error=str(e))
                 save_state(state, sp)
                 errors += 1
                 continue
@@ -133,7 +142,7 @@ def _process_videos(
 
         mark_processed(
             state, v, "ok",
-            transcript_chars=len(transcript),
+            transcript_chars=len(result.text),
             summary_chars=len(summary),
         )
         save_state(state, sp)
