@@ -21,4 +21,4 @@
 - [x] State tracking (idempotent reprocessing, error retry)
 - [x] CLI commands (run, watch, list, reset)
 - [x] Snippety CSV export
-- [x] Unit + integration + behavioral test suite (23 tests)
+- [x] Unit + integration + behavioral test suite (76 collected; 60 pass, 16 skipped — need real API key)
