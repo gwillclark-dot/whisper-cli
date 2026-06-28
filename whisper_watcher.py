@@ -32,9 +32,6 @@ import argparse
 import fcntl
 import hashlib
 import json
-import re
-import select as _select
-import signal
 import subprocess
 import sys
 import tempfile
@@ -55,12 +52,6 @@ LOCK_FILE = Path(__file__).parent / ".whisper_watcher.lock"
 LOCKS_DIR = STATE_DIR / "locks"
 POLL_INTERVAL = 30  # seconds
 DEBOUNCE_SECONDS = 120
-
-WATCHDOG_DEFAULT = 1800      # total wall-clock limit per task
-DOWNLOAD_PHASE_MAX = 600     # cap on download + caption-fetch phase
-PROGRESS_HANG_TIMEOUT = 300  # kill yt-dlp if no stdout progress for this long
-TIMEOUT_MIN = 300
-TIMEOUT_MAX = 3600
 
 # QUIET_MODE: when this file exists, suppress "Working…" and intermediate posts.
 # Only the final result message is posted.
@@ -162,7 +153,7 @@ def record_debounce(source_id: str, discord_msg_id: str | None, state: dict) -> 
 def post_message(text: str) -> str | None:
     """Post to #whisper. Returns Discord message_id, or None on failure."""
     result = subprocess.run(
-        ["clawdbot", "message", "send", "--channel", "discord",
+        ["python3", "/Users/g2/Trax/lib/discord-post.py", "--channel", "discord",
          "--target", WHISPER_CHANNEL, "--message", text, "--json"],
         capture_output=True, text=True,
     )
@@ -171,7 +162,7 @@ def post_message(text: str) -> str | None:
         return None
     try:
         data = json.loads(result.stdout)
-        # clawdbot returns payload.message.id or payload.id
+        # discord-post.py returns payload.message.id
         payload = data.get("payload", {})
         msg = payload.get("message", payload)
         return str(msg.get("id") or msg.get("messageId") or "")
@@ -186,7 +177,7 @@ def edit_message(message_id: str, text: str) -> None:
         post_message(text)
         return
     result = subprocess.run(
-        ["clawdbot", "message", "edit", "--channel", "discord",
+        ["python3", "/Users/g2/Trax/lib/discord-post.py", "--channel", "discord",
          "--target", WHISPER_CHANNEL, "--message-id", message_id,
          "--message", text],
         capture_output=True, text=True,
@@ -220,35 +211,16 @@ def download_attachment(url: str, dest_dir: Path) -> Path:
 
 
 def download_url(url: str, dest_dir: Path) -> Path:
-    """Download URL to dest_dir. Kills yt-dlp if no stdout progress for PROGRESS_HANG_TIMEOUT seconds."""
     template = str(dest_dir / "%(title).60s.%(ext)s")
-    proc = subprocess.Popen(
+    result = subprocess.run(
         ["yt-dlp", "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
          "--merge-output-format", "mp4", "--output", template, "--no-playlist",
-         "--print", "after_move:filepath", "--newline", url],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+         "--print", "after_move:filepath", url],
+        capture_output=True, text=True,
     )
-    last_progress = time.time()
-    output_lines: list[str] = []
-    while proc.poll() is None:
-        ready, _, _ = _select.select([proc.stdout], [], [], 5.0)
-        if ready:
-            line = proc.stdout.readline()
-            if line:
-                output_lines.append(line)
-                last_progress = time.time()
-                print(f"[whisper-watcher] yt-dlp: {line.rstrip()}", flush=True)
-        if time.time() - last_progress > PROGRESS_HANG_TIMEOUT:
-            proc.kill()
-            proc.wait()
-            raise RuntimeError(f"Download stalled: no progress for {PROGRESS_HANG_TIMEOUT}s")
-    remaining = proc.stdout.read()
-    if remaining:
-        output_lines.extend(remaining.splitlines(keepends=True))
-    if proc.returncode != 0:
-        tail = "".join(output_lines[-5:]).strip()
-        raise RuntimeError(f"yt-dlp failed: {tail}")
-    filepath = "".join(output_lines).strip().splitlines()[-1] if output_lines else ""
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp failed: {result.stderr.strip()}")
+    filepath = result.stdout.strip().splitlines()[-1]
     path = Path(filepath)
     if not path.exists():
         files = sorted(dest_dir.glob("*.mp4"), key=lambda f: f.stat().st_mtime)
@@ -256,35 +228,6 @@ def download_url(url: str, dest_dir: Path) -> Path:
             raise RuntimeError("yt-dlp succeeded but no mp4 found")
         path = files[-1]
     return path
-
-
-def try_fetch_captions(url: str, dest_dir: Path) -> str | None:
-    """Try to fetch auto/manual captions for a URL. Returns plain text or None."""
-    template = str(dest_dir / "%(title).60s")
-    result = subprocess.run(
-        ["yt-dlp", "--write-auto-subs", "--write-subs",
-         "--sub-langs", "en,en-US,en-GB,en-orig",
-         "--sub-format", "vtt/best",
-         "--skip-download", "--output", template, "--no-playlist", url],
-        capture_output=True, text=True, timeout=DOWNLOAD_PHASE_MAX,
-    )
-    for pattern in ("*.vtt", "*.srt", "*.ttml"):
-        files = list(dest_dir.glob(pattern))
-        if files:
-            raw = files[0].read_text(errors="replace")
-            lines: list[str] = []
-            seen: set[str] = set()
-            for line in raw.splitlines():
-                line = line.strip()
-                if not line or line.startswith("WEBVTT") or "-->" in line:
-                    continue
-                clean = re.sub(r"<[^>]+>", "", line).strip()
-                if clean and clean not in seen:
-                    seen.add(clean)
-                    lines.append(clean)
-            if lines:
-                return " ".join(lines)
-    return None
 
 
 # ── Snippety update ───────────────────────────────────────────────────────
@@ -305,33 +248,23 @@ def _update_snippety(video_path: Path, summary: str) -> None:
 
 # ── Transcribe + Summarize ────────────────────────────────────────────────
 
-def transcribe_and_summarize(
-    video_path: Path | None,
-    discord_msg_id: str | None,
-    *,
-    caption_text: str | None = None,
-) -> str:
-    """Transcribe + summarize with retries. If caption_text is provided, ASR is skipped.
-    Edits discord_msg_id on each retry. Returns formatted summary. Raises on final failure."""
+def transcribe_and_summarize(video_path: Path, discord_msg_id: str | None) -> str:
+    """Transcribe + summarize with retries. Edits discord_msg_id on each retry.
+    Returns formatted summary. Raises on final failure."""
     from whisper_cli.config import load_config
     from whisper_cli.transcriber import transcribe
     from whisper_cli.summarizer import summarize
 
     cfg = load_config()
     last_exc: Exception | None = None
-    label = video_path.name if video_path else "media"
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            if caption_text:
-                transcript = caption_text
-                print(f"[whisper-watcher] Using captions ({len(transcript)} chars) — ASR skipped")
-            else:
-                print(f"[whisper-watcher] Transcribing {label} (attempt {attempt})...")
-                transcript = transcribe(video_path, cfg.whisper_model)
+            print(f"[whisper-watcher] Transcribing {video_path.name} (attempt {attempt})...")
+            transcript = transcribe(video_path, cfg.whisper_model)
 
             print(f"[whisper-watcher] Summarizing ({len(transcript)} chars)...")
-            summary = summarize(transcript, label, cfg.openai_api_key)
+            summary = summarize(transcript, video_path.name, cfg.openai_api_key)
             return summary
 
         except Exception as e:
@@ -341,7 +274,7 @@ def transcribe_and_summarize(
                 retry_text = f"⏳ Processing… (retry {attempt}/{MAX_RETRIES - 1})"
                 if not is_quiet_mode():
                     post_or_edit(discord_msg_id, retry_text)
-                time.sleep(2 ** attempt)
+                time.sleep(2 ** attempt)  # brief backoff
 
     raise last_exc  # type: ignore[misc]
 
@@ -375,19 +308,6 @@ def has_trigger(content: str) -> bool:
         return False
 
 
-# ── Dispatch parsing ─────────────────────────────────────────────────────
-
-def parse_dispatch_timeout(content: str) -> int:
-    """Extract timeoutSec from JSON dispatch, clamped to [TIMEOUT_MIN, TIMEOUT_MAX]."""
-    try:
-        data = json.loads(content.strip())
-        if isinstance(data, dict) and "timeoutSec" in data:
-            return max(TIMEOUT_MIN, min(TIMEOUT_MAX, int(data["timeoutSec"])))
-    except Exception:
-        pass
-    return WATCHDOG_DEFAULT
-
-
 # ── Core source processing ────────────────────────────────────────────────
 
 def process_source(
@@ -398,15 +318,8 @@ def process_source(
     force: bool,
     state: dict,
     tmp: Path,
-    timeout_sec: int = WATCHDOG_DEFAULT,
 ) -> bool:
-    """Process a single source (attachment or URL). Returns True if processed.
-
-    Watchdog: kills the task after timeout_sec total wall-clock seconds.
-    Phases: caption-fetch/download (hard cap DOWNLOAD_PHASE_MAX via subprocess timeout
-    and hang-guard), ASR (covered by remaining outer watchdog time).
-    Lock is always released in finally — no stale locks on watchdog expiry.
-    """
+    """Process a single source (attachment or URL). Returns True if processed."""
 
     # Debounce: same source triggered within 120s → skip
     if not force and is_debounced(source_id, state):
@@ -420,13 +333,6 @@ def process_source(
         return False
 
     discord_msg_id: str | None = None
-
-    def _watchdog_handler(signum, frame):
-        raise TimeoutError(f"Watchdog: task killed after {timeout_sec}s")
-
-    old_handler = signal.signal(signal.SIGALRM, _watchdog_handler)
-    signal.alarm(timeout_sec)
-    print(f"[whisper-watcher] Watchdog set: {timeout_sec}s")
 
     try:
         # Last-item dedupe (24h window)
@@ -449,33 +355,15 @@ def process_source(
         record_debounce(source_id, discord_msg_id, state)
         save_state(state)
 
-        # Caption-first for URL sources (skip ASR if captions available)
-        caption_text: str | None = None
-        video_path: Path | None = None
-        content_hash = None
-
-        if source_type == "url":
-            print("[whisper-watcher] Phase 1: trying captions…")
-            try:
-                caption_text = try_fetch_captions(source_id, tmp)
-                if caption_text:
-                    print(f"[whisper-watcher] Captions found ({len(caption_text)} chars) — ASR skipped")
-                else:
-                    print("[whisper-watcher] No captions — falling back to ASR")
-            except Exception as e:
-                print(f"[whisper-watcher] Caption fetch failed (non-fatal): {e}")
-
-        if not caption_text:
-            print("[whisper-watcher] Phase 1: downloading media…")
-            video_path = get_video(tmp)
-            content_hash = file_hash(video_path) if source_type == "file" else None
+        # Fetch video
+        video_path = get_video(tmp)
+        content_hash = file_hash(video_path) if source_type == "file" else None
 
         # Transcribe + summarize (retries reuse discord_msg_id)
-        summary = transcribe_and_summarize(video_path, discord_msg_id, caption_text=caption_text)
+        summary = transcribe_and_summarize(video_path, discord_msg_id)
 
         # Auto-update Snippety CSV
-        if video_path:
-            _update_snippety(video_path, summary)
+        _update_snippety(video_path, summary)
 
         # Build final message
         short = source_label[:60] + "…" if len(source_label) > 60 else source_label
@@ -487,21 +375,14 @@ def process_source(
         dedupe_mark(source_id, source_type, content_hash)
         return True
 
-    except TimeoutError as e:
-        print(f"[whisper-watcher] {e}")
-        err_text = f"⏱️ Timed out: `{source_label[:60]}`\nKilled after {timeout_sec}s."
-        post_or_edit(discord_msg_id, err_text)
-        return False
-
     except Exception as e:
         print(f"[whisper-watcher] Failed to process {source_label}: {e}")
         err_text = f"⚠️ Failed: `{source_label[:60]}`\n{e}"
         post_or_edit(discord_msg_id, err_text)
+        # Don't mark as processed — failure is retryable
         return False
 
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
         release_source_lock(lock_fp)
 
 
@@ -513,7 +394,6 @@ def process_message(msg: dict, state: dict) -> bool:
     content = msg.get("content", "")
     attachments = msg.get("attachments", [])
     force = has_override(content)
-    timeout_sec = parse_dispatch_timeout(content)
 
     any_work = False
 
@@ -536,7 +416,6 @@ def process_message(msg: dict, state: dict) -> bool:
                 force=force,
                 state=state,
                 tmp=tmp,
-                timeout_sec=timeout_sec,
             )
             if did_work:
                 any_work = True
@@ -554,7 +433,6 @@ def process_message(msg: dict, state: dict) -> bool:
                 force=force,
                 state=state,
                 tmp=tmp,
-                timeout_sec=timeout_sec,
             )
             if did_work:
                 any_work = True
@@ -568,7 +446,7 @@ def process_message(msg: dict, state: dict) -> bool:
 
 
 def poll_once(state: dict) -> None:
-    cmd = ["clawdbot", "message", "read", "--channel", "discord",
+    cmd = ["python3", "/Users/g2/Trax/lib/discord-read.py", "--channel", "discord",
            "--target", WHISPER_CHANNEL, "--json", "--limit", "20"]
     after = state.get("last_message_id")
     if after:
@@ -576,7 +454,7 @@ def poll_once(state: dict) -> None:
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"[whisper-watcher] clawdbot read failed: {result.stderr.strip()}")
+        print(f"[whisper-watcher] discord read failed: {result.stderr.strip()}")
         return
 
     try:

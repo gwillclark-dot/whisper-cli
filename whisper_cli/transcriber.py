@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -16,13 +15,6 @@ MODEL_SIZES = {
 }
 
 
-@dataclass
-class TranscriptResult:
-    text: str
-    language: str
-    duration_secs: float
-
-
 def _get_model(model_name: str) -> whisper.Whisper:
     if model_name not in _models:
         size = MODEL_SIZES.get(model_name, "unknown size")
@@ -32,11 +24,7 @@ def _get_model(model_name: str) -> whisper.Whisper:
     return _models[model_name]
 
 
-def transcribe(video_path: Path, model_name: str = "base") -> TranscriptResult:
+def transcribe(video_path: Path, model_name: str = "base") -> str:
     model = _get_model(model_name)
     result = model.transcribe(str(video_path))
-    text = result["text"].strip()
-    language = result.get("language", "unknown")
-    segments = result.get("segments", [])
-    duration_secs = segments[-1]["end"] if segments else 0.0
-    return TranscriptResult(text=text, language=language, duration_secs=duration_secs)
+    return result["text"].strip()

@@ -63,16 +63,17 @@ def run_preflight(verbose: bool = False) -> list[str]:
         check("state dir writable", False, str(e), verbose)
         failures.append(f"State dir not writable: {STATE_DIR}")
 
-    # clawdbot available
-    clawdbot_path = shutil.which("clawdbot")
-    if not check("clawdbot", bool(clawdbot_path), clawdbot_path or "not found", verbose):
-        failures.append("clawdbot not found — Discord posting will fail")
+    # discord-post.py available
+    poster = "/Users/g2/Trax/lib/discord-post.py"
+    poster_ok = os.path.exists(poster)
+    if not check("discord-post.py", poster_ok, poster if poster_ok else "not found", verbose):
+        failures.append("discord-post.py not found — Discord posting will fail")
 
-    # Discord channel reachable (only if clawdbot is available)
-    if clawdbot_path:
+    # Discord channel reachable (only if the poster exists)
+    if poster_ok:
         try:
             result = subprocess.run(
-                ["clawdbot", "message", "send", "--channel", "discord",
+                ["python3", poster, "--channel", "discord",
                  "--target", WHISPER_CHANNEL, "--message", "🔍 preflight check"],
                 capture_output=True, text=True, timeout=60,
             )
@@ -83,7 +84,7 @@ def run_preflight(verbose: bool = False) -> list[str]:
                 # Non-fatal: Discord issues shouldn't block code sprints
                 print(f"  ⚠️  Discord post failed (non-fatal): {result.stderr.strip()[:80]}")
         except subprocess.TimeoutExpired:
-            # Non-fatal: clawdbot can be slow in subprocess context
+            # Non-fatal: the poster can be slow in subprocess context
             check("Discord #whisper postable", False, "timeout (non-fatal)", verbose)
         except Exception as e:
             check("Discord #whisper postable", False, str(e), verbose)

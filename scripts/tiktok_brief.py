@@ -91,7 +91,7 @@ def main():
             msg = f"⚠️ whisper/tiktok blocked\n{e}"
             print(msg)
             subprocess.run(
-                ["clawdbot", "message", "send", "--channel", "discord",
+                ["python3", "/Users/g2/Trax/lib/discord-post.py", "--channel", "discord",
                  "--target", CHANNEL, "--message", msg],
                 check=False,
             )
@@ -144,7 +144,7 @@ def main():
     print("\n--- Posting ---", flush=True)
 
     subprocess.run(
-        ["clawdbot", "message", "send",
+        ["python3", "/Users/g2/Trax/lib/discord-post.py",
          "--channel", "discord",
          "--target", CHANNEL,
          "--message", discord_msg],

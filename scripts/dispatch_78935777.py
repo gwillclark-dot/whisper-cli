@@ -88,7 +88,7 @@ def main():
 
     subprocess.run(
         [
-            "clawdbot", "message", "send",
+            "python3", "/Users/g2/Trax/lib/discord-post.py",
             "--channel", "discord",
             "--target", CHANNEL,
             "--message", discord_msg,
